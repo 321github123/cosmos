@@ -72,8 +72,7 @@ def print_usage
   puts "  cli bridge CONFIG_FILENAME        # Run COSMOS host bridge"
   puts "  cli bridgegem gem_name variable1=value1 variable2=value2 # Runs bridge using gem bridge.txt"
   puts "  cli bridgesetup CONFIG_FILENAME   # Create a default config file"
-  puts "  cli pkginstall PKGFILENAME SCOPE  # Install loaded package (Ruby gem or python package)"
-  puts "  cli pkguninstall PKGFILENAME SCOPE  # Uninstall loaded package (Ruby gem or python package)"
+  puts "  cli geminstall GEMFILENAME SCOPE  # Install loaded gem to /gems"
   puts "  cli rubysloc                      # Counts Ruby SLOC recursively. Run with --help for more info."
   puts "  cli xtce_converter                # Convert to and from the XTCE format. Run with --help for more info."
   puts "  cli cstol_converter               # Converts CSTOL files (.prc) to COSMOS. Run with --help for more info."
@@ -88,11 +87,7 @@ def check_environment
     abort "Unable to resolv api hostname: #{hostname}"
   end
 
-  if hostname =~ /openc3-cosmos-cmd-tlm-api/
-    $openc3_in_cluster = true
-  else
-    $openc3_in_cluster = false
-  end
+  $openc3_in_cluster = (ENV['OPENC3_IN_CLUSTER'] ? true : false)
 
   unless $openc3_in_cluster
     # Make sure the user has all the required environment variables set
@@ -366,14 +361,14 @@ def wait_process_complete(process_name)
     print '.'
     STDOUT.flush
   end
-  puts "\nFinished: #{state}"
+
+  puts "\nFinished waiting for process."
   puts "Output:\n"
   puts status['output']
-  if state == 'Complete'
-    puts "Success!"
+  puts "State: #{state}"
+  if ['Complete', 'Warning'].include?(state)
     exit 0
   else
-    puts "Failed!"
     exit 1
   end
 end
@@ -508,43 +503,30 @@ def unload_plugin(plugin_name, scope:)
   end
 end
 
-def cli_pkg_install(filename, scope:)
+def cli_gem_install(gem_filename, scope:)
   scope ||= 'DEFAULT'
   check_environment()
   if $openc3_in_cluster
-    if File.extname(filename) == '.gem'
-      OpenC3::GemModel.install(filename, scope: scope)
-    else
-      OpenC3::PythonPackageModel.install(filename, scope: scope)
-    end
+    OpenC3::GemModel.install(gem_filename, scope: scope)
   else
     # Outside Cluster
     require 'openc3/script'
-    process_name = package_install(filename, scope: scope)
+    process_name = gem_install(gem_filename, scope: scope)
     print "Installing..."
     wait_process_complete(process_name)
   end
 end
 
-def cli_pkg_uninstall(filename, scope:)
+def cli_gem_uninstall(gem_filename, scope:)
   scope ||= 'DEFAULT'
   check_environment()
   if $openc3_in_cluster
-    if File.extname(filename) == '.rb'
-      OpenC3::GemModel.destroy(filename)
-    else
-      OpenC3::PythonPackageModel.destroy(filename, scope: scope)
-    end
+    OpenC3::GemModel.destroy(gem_filename)
   else
     # Outside Cluster
     require 'openc3/script'
-    process_name = package_uninstall(filename, scope: scope)
-    if File.extname(filename) == '.rb'
-      puts "Uninstalled"
-    else
-      print "Uninstalling..."
-      wait_process_complete(process_name)
-    end
+    gem_uninstall(gem_filename, scope: scope)
+    puts "Success!"
   end
 end
 
@@ -628,6 +610,31 @@ def run_bridge(filename, params)
   end
 end
 
+def get_gem_name_from_file_path(file_path)
+  full_name = File.basename(file_path, ".gem")
+  gem_name = full_name.split('-')[0..-2].join('-')
+  return gem_name
+end
+
+def find_plugin_with_same_gem_name(plugin_file_path, scope:)
+  require 'openc3/script'
+
+  scope ||= 'DEFAULT'
+
+  output = nil
+  file_gem_name = get_gem_name_from_file_path(plugin_file_path)
+  plugin_names = OpenC3::Script.send(:plugin_list, **{scope: scope})
+  plugin_names.each do |plugin_name|
+    gem_name = get_gem_name_from_file_path(plugin_name.split("__")[0])
+    if file_gem_name == gem_name
+      output = plugin_name
+      break
+    end
+  end
+
+  return output
+end
+
 if not ARGV[0].nil? # argument(s) given
 
   # Handle each task
@@ -651,11 +658,19 @@ if not ARGV[0].nil? # argument(s) given
   when 'unload'
     unload_plugin(ARGV[1], scope: ARGV[2])
 
-  when 'pkginstall', 'geminstall'
-    cli_pkg_install(ARGV[1], scope: ARGV[2])
+  when 'unload_plugin_with_same_gem_name'
+    plugin_with_same_gem_name = find_plugin_with_same_gem_name(ARGV[1], scope: ARGV[2])
+    if plugin_with_same_gem_name
+      puts("Plugin found with gem matching = #{ARGV[1]}. Unloading ...")
+      unload_plugin(plugin_with_same_gem_name, scope: ARGV[2])
+    else
+      puts("No plugin found with gem matching = #{ARGV[1]}")
+    end
+  when 'geminstall'
+    cli_gem_install(ARGV[1], scope: ARGV[2])
 
-  when 'pkguninstall', 'gemuninstall'
-    cli_pkg_uninstall(ARGV[1], scope: ARGV[2])
+  when 'gemuninstall'
+    cli_gem_uninstall(ARGV[1], scope: ARGV[2])
 
   when 'generate'
     OpenC3::CliGenerator.generate(ARGV[1..-1])
